@@ -38,7 +38,7 @@ jobs:
           COINGECKO_DEMO_API_KEY: ${{ secrets.COINGECKO_DEMO_API_KEY }}
           COINGECKO_PRO_API_KEY: ${{ secrets.COINGECKO_PRO_API_KEY }}
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
-        run: python alerts_rsi_lt50.py
+        run: python alerts_bot.py
 
       - name: Persist alert cache
         if: always()
