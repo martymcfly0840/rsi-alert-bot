@@ -91,7 +91,7 @@ RULES: List[Dict[str, Any]] = [
         "threshold": 50,
         "timeframe": "1h",
         "scope": "both",
-        "enabled": True
+        "enabled": False
     },
     {
         "name": "RSI<45 & BB-Lower (4h)",
