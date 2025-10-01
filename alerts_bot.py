@@ -61,17 +61,17 @@ RULES: List[Dict[str, Any]] = [
         "threshold": 50,
         "timeframe": "1h",
         "scope": "both",
-        "enabled": True
+        "enabled": False
     },
     {
-        "name": "RSI<40 & BB-Lower (4h)",
+        "name": "RSI<45 & BB-Lower (1h)",
         "type": "composite",
         "all": [
-            {"type": "rsi_below", "threshold": 40, "timeframe": "4h"},
-            {"type": "bb_touch", "band": "lower", "timeframe": "4h", "period": 20, "stddev": 2.0}
+            {"type": "rsi_below", "threshold": 45, "timeframe": "4h"},
+            {"type": "bb_touch", "band": "lower", "timeframe": "1h", "period": 20, "stddev": 2.0}
         ],
-        "scope": "crypto",
-        "enabled": False
+        "scope": "both",
+        "enabled": True
     },
     {
         "name": "RSI<45 (1d) – csak részvények",
