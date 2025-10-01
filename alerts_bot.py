@@ -2,7 +2,7 @@
 """
 alerts_bot.py – Moduláris szabálymotor (RSI/BB) Twelve Data (részvény) + CoinGecko (kripto) + Discord
 - Idősíkok: 1h / 4h / 1d
-- Könnyen bővíthető RULES lista a fájl tetején
+- Könnyen bővíthető RULES lista a fájl tetején (enabled flaggel kapcsolható szabályok)
 
 Secrets (GitHub → Settings → Secrets → Actions):
   TWELVEDATA_API_KEY, COINGECKO_DEMO_API_KEY (vagy COINGECKO_PRO_API_KEY), DISCORD_WEBHOOK_URL
@@ -53,22 +53,43 @@ CONFIG = {
 # ---- SZABÁLYOK: itt adj hozzá új kéréseket (RSI, BB, kombinációk) ----
 # type: "rsi_below" | "bb_touch" | "composite"
 # scope: "stocks" | "crypto" | "both"
+# enabled: True -> fut | False -> NEM fut
 RULES: List[Dict[str, Any]] = [
-    {  # 1) Az eddigi alap kérés
-        "name": "RSI<50 (alap)",
+    {
+        "name": "RSI<50 (alap) [1h]",
         "type": "rsi_below",
         "threshold": 50,
         "timeframe": "1h",
-        "scope": "both"
+        "scope": "both",
+        "enabled": False
     },
-    {  # 2) Példa: RSI<40 ÉS Bollinger alsó érintés 4 óráson (csak kriptókra)
-        "name": "RSI<40 & BB-Lower (4h)",
+    {
+        "name": "RSI<50 & BB-Lower (4h)",
         "type": "composite",
         "all": [
-            {"type": "rsi_below", "threshold": 40, "timeframe": "4h"},
+            {"type": "rsi_below", "threshold": 50, "timeframe": "4h"},
             {"type": "bb_touch", "band": "lower", "timeframe": "4h", "period": 20, "stddev": 2.0}
         ],
-        "scope": "crypto"
+        "scope": "both",
+        "enabled": True
+    },
+    {
+        "name": "RSI<45 (1d) – csak részvények",
+        "type": "rsi_below",
+        "threshold": 45,
+        "timeframe": "1d",
+        "scope": "stocks",
+        "enabled": False
+    },
+    {
+        "name": "BB lower érintés (4h) – mindkét piac",
+        "type": "bb_touch",
+        "band": "lower",
+        "timeframe": "4h",
+        "period": 20,
+        "stddev": 2.0,
+        "scope": "both",
+        "enabled": False
     },
 ]
 
@@ -172,6 +193,7 @@ TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "").strip()
 TD_BASE = "https://api.twelvedata.com"
 
 def td_series_batch(symbols: List[str], interval: str, outputsize: int) -> Dict[str, pd.Series]:
+    """ Több szimbólumra OHLC time_series, interval: '1h' | '4h' | '1day' -> close sorozat """
     params = {"symbol": ",".join(symbols), "interval": interval, "outputsize": outputsize,
               "order": "asc", "apikey": TWELVEDATA_API_KEY}
     out: Dict[str, pd.Series] = {}
@@ -180,7 +202,7 @@ def td_series_batch(symbols: List[str], interval: str, outputsize: int) -> Dict[
         data = r.json()
         for sym in symbols:
             sub = data.get(sym)
-            if not sub or "values" not in sub: 
+            if not sub or "values" not in sub:
                 continue
             df = pd.DataFrame(sub["values"]).rename(columns=str.lower)
             df["close"] = pd.to_numeric(df["close"], errors="coerce")
@@ -211,7 +233,8 @@ def cg_markets(vs: str, per_page: int, pages: int, min_vol: float) -> List[dict]
         try:
             r = requests.get(f"{base}/coins/markets", params=params, headers=headers, timeout=30)
             if r.status_code == 429:
-                time.sleep(2.5); r = requests.get(f"{base}/coins/markets", params=params, headers=headers, timeout=30)
+                time.sleep(2.5)
+                r = requests.get(f"{base}/coins/markets", params=params, headers=headers, timeout=30)
             data = r.json()
             if isinstance(data, list):
                 out += [row for row in data if float(row.get("total_volume", 0) or 0) >= min_vol]
@@ -221,7 +244,7 @@ def cg_markets(vs: str, per_page: int, pages: int, min_vol: float) -> List[dict]
     return out
 
 def cg_series(coin_id: str, vs: str, timeframe: str) -> Optional[pd.Series]:
-    """1h: hourly(7d); 4h: hourly(14d)→resample 4H; 1d: daily(365d)"""
+    """ 1h: hourly(7d); 4h: hourly(14d)→resample 4H; 1d: daily(365d) – CG auto granularitás """
     base, headers = cg_base(), cg_headers()
     days = 7 if timeframe=="1h" else (14 if timeframe=="4h" else 365)
     try:
@@ -229,9 +252,10 @@ def cg_series(coin_id: str, vs: str, timeframe: str) -> Optional[pd.Series]:
                          params={"vs_currency": vs, "days": days},
                          headers=headers, timeout=30)
         if r.status_code == 429:
-            time.sleep(2.5); r = requests.get(f"{base}/coins/{coin_id}/market_chart",
-                                              params={"vs_currency": vs, "days": days},
-                                              headers=headers, timeout=30)
+            time.sleep(2.5)
+            r = requests.get(f"{base}/coins/{coin_id}/market_chart",
+                             params={"vs_currency": vs, "days": days},
+                             headers=headers, timeout=30)
         data = r.json(); prices = data.get("prices")
         if not prices: return None
         df = pd.DataFrame(prices, columns=["ts","price"])
@@ -251,24 +275,31 @@ def cg_series(coin_id: str, vs: str, timeframe: str) -> Optional[pd.Series]:
 # SZABÁLYKIÉRTÉKELÉS
 # -----------------------------
 def eval_rsi_below(series: pd.Series, thr: float, period: int) -> Optional[float]:
-    if series is None or len(series) < period + 5: return None
-    rsi = compute_rsi(series, period); last = float(rsi.iloc[-1])
+    if series is None or len(series) < period + 5:
+        return None
+    rsi = compute_rsi(series, period)
+    last = float(rsi.iloc[-1])
     return last if last < thr else None
 
 def eval_bb_touch(series: pd.Series, period: int, stddev: float, band: str) -> bool:
-    if series is None or len(series) < period + 5: return False
-    lower, mid, upper = compute_bbands(series, period, stddev); close = series.iloc[-1]
+    if series is None or len(series) < period + 5:
+        return False
+    lower, mid, upper = compute_bbands(series, period, stddev)
+    close = series.iloc[-1]
     lb = None if pd.isna(lower.iloc[-1]) else float(lower.iloc[-1])
     ub = None if pd.isna(upper.iloc[-1]) else float(upper.iloc[-1])
-    return (band=="lower" and lb is not None and close <= lb) or (band=="upper" and ub is not None and close >= ub)
+    return (band == "lower" and lb is not None and close <= lb) or (band == "upper" and ub is not None and close >= ub)
 
 def run_rules_for(kind: str, symbol: str, get_series_fn, get_price_fn) -> int:
     cache, cooldown = load_cache(), CONFIG["alerts"]["cooldown_minutes"]
     alerts = 0
-    # mely idősíkok kellenek ehhez az eszközhöz?
-    needed = set()
+    # mely idősíkok kellenek (CSAK az enabled szabályokhoz)?
+    needed: set = set()
     for r in RULES:
-        if r["scope"] not in ("both", kind): continue
+        if r.get("enabled", True) is False:
+            continue
+        if r["scope"] not in ("both", kind):
+            continue
         if r["type"] == "composite":
             needed |= {c["timeframe"] for c in r["all"]}
         else:
@@ -276,33 +307,41 @@ def run_rules_for(kind: str, symbol: str, get_series_fn, get_price_fn) -> int:
     # előtöltjük a sorozatokat
     series_cache: Dict[str, pd.Series] = {tf: get_series_fn(tf) for tf in needed}
     cur_price = get_price_fn()
-    # szabályok futtatása
+    # szabályok futtatása (CSAK az enabled szabályok)
     for r in RULES:
-        if r["scope"] not in ("both", kind): continue
+        if r.get("enabled", True) is False:
+            continue
+        if r["scope"] not in ("both", kind):
+            continue
         fired, rep_rsi, tf = False, None, None
         if r["type"] == "composite":
             oks, rsis, tfs = [], [], []
             for c in r["all"]:
-                s = series_cache.get(c["timeframe"]); tf = c["timeframe"]; tfs.append(tf)
+                s = series_cache.get(c["timeframe"])
+                tf = c["timeframe"]; tfs.append(tf)
                 if c["type"] == "rsi_below":
                     val = eval_rsi_below(s, float(c["threshold"]), CONFIG[kind]["rsi_period"])
                     oks.append(val is not None); rsis.append(val)
                 elif c["type"] == "bb_touch":
-                    ok = eval_bb_touch(s, int(c.get("period", CONFIG[kind]["bb_period"])),
+                    ok = eval_bb_touch(s,
+                                       int(c.get("period", CONFIG[kind]["bb_period"])),
                                        float(c.get("stddev", CONFIG[kind]["bb_stddev"])),
-                                       c.get("band","lower"))
+                                       c.get("band", "lower"))
                     oks.append(ok); rsis.append(None)
-            fired = all(oks); tf = tfs[0] if tfs else None
+            fired = all(oks)
+            tf = tfs[0] if tfs else None
             rep_rsi = next((x for x in rsis if x is not None), None)
         else:
-            s = series_cache.get(r["timeframe"]); tf = r["timeframe"]
+            s = series_cache.get(r["timeframe"])
+            tf = r["timeframe"]
             if r["type"] == "rsi_below":
                 rep_rsi = eval_rsi_below(s, float(r["threshold"]), CONFIG[kind]["rsi_period"])
                 fired = rep_rsi is not None
             elif r["type"] == "bb_touch":
-                fired = eval_bb_touch(s, int(r.get("period", CONFIG[kind]["bb_period"])),
+                fired = eval_bb_touch(s,
+                                      int(r.get("period", CONFIG[kind]["bb_period"])),
                                       float(r.get("stddev", CONFIG[kind]["bb_stddev"])),
-                                      r.get("band","lower"))
+                                      r.get("band", "lower"))
         if fired:
             key = f"{kind}::{symbol}::{r['name']}::{tf}"
             if can_alert(cache, key, cooldown):
@@ -315,23 +354,30 @@ def run_rules_for(kind: str, symbol: str, get_series_fn, get_price_fn) -> int:
 # -----------------------------
 def run_stocks() -> int:
     if not TWELVEDATA_API_KEY:
-        logger.error("Hiányzik a TWELVEDATA_API_KEY"); return 0
+        logger.error("Hiányzik a TWELVEDATA_API_KEY")
+        return 0
     syms = load_universe(CONFIG["stocks"]["files"], CONFIG["stocks"]["max_symbols"])
-    if not syms: logger.warning("Részvény tickerlista üres."); return 0
+    if not syms:
+        logger.warning("Részvény tickerlista üres.")
+        return 0
     alerts = 0
-    # az összes érintett idősík
+    # az összes érintett idősík (CSAK enabled + stocks/both scope)
     tfs = set()
     for r in RULES:
-        if r["scope"] in ("both","stocks"):
-            if r["type"]=="composite": tfs |= {c["timeframe"] for c in r["all"]}
-            else: tfs.add(r["timeframe"])
-    interval_map = {"1h":"1h","4h":"4h","1d":"1day"}
+        if r.get("enabled", True) is False:
+            continue
+        if r["scope"] in ("both", "stocks"):
+            if r["type"] == "composite":
+                tfs |= {c["timeframe"] for c in r["all"]}
+            else:
+                tfs.add(r["timeframe"])
+    interval_map = {"1h": "1h", "4h": "4h", "1d": "1day"}
     for tf in sorted(tfs):
-        td_interval = interval_map.get(tf,"1h")
+        td_interval = interval_map.get(tf, "1h")
         logger.info(f"Részvények ({tf}) szkennelése...")
         # batch
         for i in range(0, len(syms), CONFIG["stocks"]["batch_size"]):
-            batch = syms[i:i+CONFIG["stocks"]["batch_size"]]
+            batch = syms[i:i + CONFIG["stocks"]["batch_size"]]
             series_map = td_series_batch(batch, td_interval, CONFIG["stocks"]["outputsize"])
             for sym in batch:
                 s = series_map.get(sym)
@@ -345,17 +391,24 @@ def run_stocks() -> int:
 def run_crypto() -> int:
     rows = cg_markets(CONFIG["crypto"]["vs_currency"], CONFIG["crypto"]["per_page"],
                       CONFIG["crypto"]["market_pages"], CONFIG["crypto"]["min_24h_volume"])
-    if not rows: logger.warning("Kripto univerzum üres."); return 0
+    if not rows:
+        logger.warning("Kripto univerzum üres.")
+        return 0
     rows = sorted(rows, key=lambda r: r.get("market_cap", 0) or 0, reverse=True)[:CONFIG["crypto"]["top_n_for_rsi"]]
-    # idősíkok, amik a szabályokban érintik a kriptót
+    # idősíkok, amik a szabályokban érintik a kriptót (CSAK enabled + crypto/both)
     tfs = set()
     for r in RULES:
-        if r["scope"] in ("both","crypto"):
-            if r["type"]=="composite": tfs |= {c["timeframe"] for c in r["all"]}
-            else: tfs.add(r["timeframe"])
+        if r.get("enabled", True) is False:
+            continue
+        if r["scope"] in ("both", "crypto"):
+            if r["type"] == "composite":
+                tfs |= {c["timeframe"] for c in r["all"]}
+            else:
+                tfs.add(r["timeframe"])
     alerts = 0
     for row in rows:
-        cid = row.get("id"); sym = (row.get("symbol") or "").upper()
+        cid = row.get("id")
+        sym = (row.get("symbol") or "").upper()
         cur_price = float(row.get("current_price", 0) or 0)
         # előre lekérjük minden szükséges tf sorozatát
         series_cache: Dict[str, pd.Series] = {}
@@ -371,12 +424,17 @@ def run_crypto() -> int:
 # MAIN
 # -----------------------------
 def main():
-    start = dt.datetime.now(); logger.info("=== Rule Engine futás indul ===")
+    start = dt.datetime.now()
+    logger.info("=== Rule Engine futás indul ===")
     total = 0
-    try: total += run_stocks()
-    except Exception as e: logger.exception(f"Részvény-hiba: {e}")
-    try: total += run_crypto()
-    except Exception as e: logger.exception(f"Kripto-hiba: {e}")
+    try:
+        total += run_stocks()
+    except Exception as e:
+        logger.exception(f"Részvény-hiba: {e}")
+    try:
+        total += run_crypto()
+    except Exception as e:
+        logger.exception(f"Kripto-hiba: {e}")
     dur = dt.datetime.now() - start
     logger.info(f"=== Kész. Jelzések: {total}, futási idő: {dur} ===")
 
