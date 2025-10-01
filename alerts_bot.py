@@ -53,22 +53,44 @@ CONFIG = {
 # ---- SZABÁLYOK: itt adj hozzá új kéréseket (RSI, BB, kombinációk) ----
 # type: "rsi_below" | "bb_touch" | "composite"
 # scope: "stocks" | "crypto" | "both"
+# enabled: True -> fut | False -> NEM fut
+
 RULES: List[Dict[str, Any]] = [
-    {  # 1) Az eddigi alap kérés
-        "name": "RSI<50 (alap)",
+    {
+        "name": "RSI<50 (alap) [1h]",
         "type": "rsi_below",
         "threshold": 50,
         "timeframe": "1h",
-        "scope": "both"
+        "scope": "both",
+        "enabled": False
     },
-    {  # 2) Példa: RSI<40 ÉS Bollinger alsó érintés 4 óráson (csak kriptókra)
+    {
         "name": "RSI<40 & BB-Lower (4h)",
         "type": "composite",
         "all": [
             {"type": "rsi_below", "threshold": 40, "timeframe": "4h"},
             {"type": "bb_touch", "band": "lower", "timeframe": "4h", "period": 20, "stddev": 2.0}
         ],
-        "scope": "crypto"
+        "scope": "crypto",
+        "enabled": False    # ← ha szeretnéd, bármikor átválthatod True-ra
+    },
+    {
+        "name": "RSI<45 (1d) – csak részvények",
+        "type": "rsi_below",
+        "threshold": 45,
+        "timeframe": "1d",
+        "scope": "stocks",
+        "enabled": False
+    },
+    {
+        "name": "BB lower érintés (4h) – mindkét piac",
+        "type": "bb_touch",
+        "band": "lower",
+        "timeframe": "4h",
+        "period": 20,
+        "stddev": 2.0,
+        "scope": "both",
+        "enabled": True
     },
 ]
 
