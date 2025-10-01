@@ -64,11 +64,11 @@ RULES: List[Dict[str, Any]] = [
         "enabled": False
     },
     {
-        "name": "RSI<45 & BB-Lower (1h)",
+        "name": "RSI<45 & BB-Lower (4h)",
         "type": "composite",
         "all": [
             {"type": "rsi_below", "threshold": 45, "timeframe": "4h"},
-            {"type": "bb_touch", "band": "lower", "timeframe": "1h", "period": 20, "stddev": 2.0}
+            {"type": "bb_touch", "band": "lower", "timeframe": "4h", "period": 20, "stddev": 2.0}
         ],
         "scope": "both",
         "enabled": True
