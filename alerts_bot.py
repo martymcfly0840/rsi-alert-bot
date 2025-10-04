@@ -1,10 +1,16 @@
 # -*- coding: utf-8 -*-
 """
 alerts_bot.py – Modular rule engine (RSI/BB) for Stocks (Twelve Data) & Crypto (CoinGecko) + Discord alerts
+
+Features
 - Timeframes: 1h / 4h / 1d
-- RULES list at the top with `enabled` flags to toggle strategies on/off
+- RULES list with `enabled` flags (flip True/False without touching the engine)
 - Option B1: frequent runs, but max 1 alert per bar (per-bar dedupe key)
-- Filters: exclude stablecoins & NFT tokens from the crypto universe
+- Crypto filters: exclude stablecoins & NFT tokens
+- Bollinger tolerance expressed as % of band WIDTH (lower: close <= LB + tol%*width)
+- DEBUG & Diagnostics:
+  * DEBUG smoke-test rule (disabled by default)
+  * Diagnostics counters: how many met RSI leg, BB leg, and BOTH (per market), plus sample tickers
 
 GitHub Secrets required:
   TWELVEDATA_API_KEY
@@ -12,13 +18,8 @@ GitHub Secrets required:
   DISCORD_WEBHOOK_URL
 """
 
-import os
-import time
-import json
-import logging
-import datetime as dt
+import os, time, json, logging, datetime as dt
 from typing import List, Dict, Optional, Any
-
 import pandas as pd
 import requests
 
@@ -27,90 +28,90 @@ import requests
 # -----------------------------
 CONFIG = {
     "stocks": {
-        # We can scan multiple timeframes in one run if your rules use them
         "timeframes": ["1h", "4h", "1d"],
         "rsi_period": 14,
         "bb_period": 20,
         "bb_stddev": 2.0,
-        "outputsize": 500,                 # bars per request (enough for RSI/BB & backfill)
+        "outputsize": 500,
         "batch_size": 25,
         "sleep_between_batches_sec": 2.0,
         "files": ["sp500.csv", "russell2000.csv"],
-        "max_symbols": None,               # cap if needed
+        "max_symbols": None,
     },
     "crypto": {
         "timeframes": ["1h", "4h", "1d"],
         "vs_currency": "usd",
-        "market_pages": 4,                 # 4 * 250 = 1000 top coins by mcap
+        "market_pages": 4,                 # 4 * 250 = 1000
         "per_page": 250,
-        "min_24h_volume": 500_000,         # drop illiquid coins early
-        "top_n_for_rsi": 200,              # compute indicators on top N after filters
+        "min_24h_volume": 500_000,
+        "top_n_for_rsi": 200,
         "rsi_period": 14,
         "bb_period": 20,
         "bb_stddev": 2.0,
         "sleep_between_market_pages_sec": 1.0,
         "sleep_between_chart_calls_sec": 2.2,
 
-        # ---- Filters for the crypto universe ----
+        # --- Crypto universe filters ---
         "filters": {
             "exclude_stablecoins": True,
             "exclude_nft_tokens": True,
 
-            # Symbols considered stable (lowercase). Extend as needed.
+            # Stable symbols (lowercase) – extend as needed
             "stable_symbol_list": [
                 "usdt","usdc","tusd","dai","frax","usdd","gusd","lusd","susd",
                 "usde","usdp","pax","fdusd","pyusd","alusd","cusd","usdy","usdx",
                 "ousd","usd1","rlusd"
             ],
-
-            # If id/name contains any of these substrings -> likely stable (lowercase)
+            # Treat as stable if id/name contains any of these (lowercase)
             "stable_id_or_name_contains": ["usd", "stable", "pegged"],
-
-            # (Meaningful if vs_currency="usd")
-            "stable_price_band": [0.96, 1.04],        # ~±4% band
-            "max_abs_24h_change_pct_for_stable": 1.0  # |24h%| <= 1% -> likely stable
+            # Heuristics (if vs_currency="usd")
+            "stable_price_band": [0.96, 1.04],        # ~±4%
+            "max_abs_24h_change_pct_for_stable": 1.0  # |24h%| <= 1%
         }
     },
     "alerts": {
         "discord_webhook": os.getenv("DISCORD_WEBHOOK_URL", "").strip(),
-        "cooldown_minutes": 45,            # still applies, but per-bar dedupe will be stricter
+        "cooldown_minutes": 45,                       # per cache key (we also dedupe per bar)
         "embed_color_stock": 0x2e7d32,
         "embed_color_crypto": 0x1565c0
+    },
+    # --- Diagnostics block ---
+    "debug": {
+        "diagnostics": True,    # set False to silence DIAG logs after tuning
+        "show_first_n": 8       # sample tickers to print per leg
     },
     "logging": {"level": "INFO"}
 }
 
-# ---- RULES: add new conditions here (toggle with enabled=True/False) ----
-# type: "rsi_below" | "bb_touch" | "composite"
-# scope: "stocks" | "crypto" | "both"
-# timeframe: "1h" | "4h" | "1d"
-RULES: List[Dict[str, Any]] = [ 
+# ---- RULES: add/enable what you need ----
+# Types: "rsi_below" | "bb_touch" | "composite"
+# Scope: "stocks" | "crypto" | "both"
+# TFs:   "1h" | "4h" | "1d"
+
+RULES: List[Dict[str, Any]] = [
+    # A) DEBUG smoke-test rule (ALWAYS hits) – turn on if you want to test notifications quickly
     {
-  "name": "DEBUG – RSI<200 (1h, both)",
-  "type": "rsi_below",
-  "threshold": 200,
-  "timeframe": "1h",
-  "scope": "both",
-  "enabled": False
-    },
-    {
-        "name": "RSI<50 (base) [1h]",
+        "name": "DEBUG – RSI<200 (1h, both)",
         "type": "rsi_below",
-        "threshold": 50,
+        "threshold": 200,
         "timeframe": "1h",
         "scope": "both",
-        "enabled": False
+        "enabled": False   # <-- set to True only when you want to test Discord end-to-end
     },
+
+    # Your requested composite 4h rule, with Bollinger tolerance as % of band width
     {
-        "name": "RSI<45 & BB-Lower (4h)",
+        "name": "RSI<45 & BB-Lower (4h, tol=10% width)",
         "type": "composite",
         "all": [
             {"type": "rsi_below", "threshold": 45, "timeframe": "4h"},
-            {"type": "bb_touch", "band": "lower", "timeframe": "4h", "period": 20, "stddev": 2.0}
+            {"type": "bb_touch", "band": "lower", "timeframe": "4h", "period": 20, "stddev": 2.0,
+             "tolerance_pct": 10}  # <-- change to 12/15 if you want a bit more permissive
         ],
-        "scope": "both",
+        "scope": "both",   # runs for Stocks (Twelve Data) and Crypto (CoinGecko)
         "enabled": True
     },
+
     # Examples (disabled by default)
     {
         "name": "RSI<45 (1d) – stocks only",
@@ -127,6 +128,7 @@ RULES: List[Dict[str, Any]] = [
         "timeframe": "4h",
         "period": 20,
         "stddev": 2.0,
+        "tolerance_pct": 0,  # 0 = strict touch
         "scope": "both",
         "enabled": False
     },
@@ -216,7 +218,7 @@ def send_discord_alert(symbol: str, rule_name: str, rsi_value: Optional[float], 
         logger.exception(f"Discord call failed: {e}")
 
 def bar_id_for_series(series: pd.Series, timeframe: str) -> Optional[str]:
-    """Return a stable identifier for the last bar of a series, per timeframe (for per-bar dedupe)."""
+    """Stable identifier for last bar (for per-bar dedupe)."""
     if series is None or series.empty:
         return None
     last_idx = series.index[-1]
@@ -281,7 +283,7 @@ def cg_base() -> str:
 def cg_headers() -> Dict[str, str]:
     return {"x-cg-pro-api-key": CG_PRO_KEY} if CG_PRO_KEY else ({"x-cg-demo-api-key": CG_DEMO_KEY} if CG_DEMO_KEY else {})
 
-# ---- NEW: Filters for crypto universe ----
+# -- Crypto filters --
 def is_probable_stablecoin(row: dict, fcfg: dict) -> bool:
     sym = (row.get("symbol") or "").lower()
     cid = (row.get("id") or "").lower()
@@ -289,16 +291,13 @@ def is_probable_stablecoin(row: dict, fcfg: dict) -> bool:
     price = row.get("current_price")
     chg24 = row.get("price_change_percentage_24h")
 
-    # 1) explicit symbols
     if sym in set(fcfg.get("stable_symbol_list", [])):
         return True
 
-    # 2) id/name substrings
     needles = tuple(x.lower() for x in fcfg.get("stable_id_or_name_contains", []))
     if any(n in cid for n in needles) or any(n in name for n in needles):
         return True
 
-    # 3) price band + low |24h%| if vs_currency is usd
     try:
         low, high = fcfg.get("stable_price_band", [0.98, 1.02])
         if price is not None and low <= float(price) <= high:
@@ -318,7 +317,6 @@ def cg_markets(vs: str, per_page: int, pages: int, min_vol: float) -> List[dict]
     base, headers = cg_base(), cg_headers()
     out: List[dict] = []
 
-    # Filter switches
     fcfg = CONFIG["crypto"].get("filters", {})
     flag_excl_stable = bool(fcfg.get("exclude_stablecoins", True))
     flag_excl_nft     = bool(fcfg.get("exclude_nft_tokens", True))
@@ -344,22 +342,15 @@ def cg_markets(vs: str, per_page: int, pages: int, min_vol: float) -> List[dict]
             data = r.json()
             if isinstance(data, list):
                 for row in data:
-                    # base filter: min volume
                     if float(row.get("total_volume", 0) or 0) < min_vol:
                         continue
-
-                    # stablecoin filter
                     if flag_excl_stable and is_probable_stablecoin(row, fcfg):
                         dropped_stable += 1
                         continue
-
-                    # NFT token filter
                     if flag_excl_nft and is_probable_nft_token(row):
                         dropped_nft += 1
                         continue
-
-                    out.append(row)
-                    kept += 1
+                    out.append(row); kept += 1
         except Exception as e:
             logger.debug(f"CoinGecko markets error p={p}: {e}")
 
@@ -369,7 +360,7 @@ def cg_markets(vs: str, per_page: int, pages: int, min_vol: float) -> List[dict]
     return out
 
 def cg_series(coin_id: str, vs: str, timeframe: str) -> Optional[pd.Series]:
-    """ 1h: hourly(7d); 4h: hourly(14d)→resample 4H; 1d: daily(365d). Granularity is automatic by 'days'. """
+    """1h: hourly(7d); 4h: hourly(14d)→resample 4H; 1d: daily(365d)."""
     base, headers = cg_base(), cg_headers()
     days = 7 if timeframe == "1h" else (14 if timeframe == "4h" else 365)
     try:
@@ -392,11 +383,19 @@ def cg_series(coin_id: str, vs: str, timeframe: str) -> Optional[pd.Series]:
             s = df["price"].resample("1H").last().dropna()
         elif timeframe == "4h":
             s = df["price"].resample("1H").last().dropna().resample("4H").last().dropna()
-        else:  # 1d
+        else:
             s = df["price"].resample("1D").last().dropna()
         return s
     except Exception:
         return None
+
+# -----------------------------
+# DIAGNOSTICS (global accumulators per run)
+# -----------------------------
+DIAG = {
+    "stocks": {"rsi_only": set(), "bb_only": set(), "both": set()},
+    "crypto": {"rsi_only": set(), "bb_only": set(), "both": set()}
+}
 
 # -----------------------------
 # RULE EVALUATION
@@ -408,16 +407,52 @@ def eval_rsi_below(series: pd.Series, thr: float, period: int) -> Optional[float
     last = float(rsi.iloc[-1])
     return last if last < thr else None
 
-def eval_bb_touch(series: pd.Series, period: int, stddev: float, band: str) -> bool:
+def eval_bb_touch(series: pd.Series, period: int, stddev: float, band: str,
+                  tolerance_pct: float = 0.0) -> bool:
+    """
+    Bollinger 'touch' with tolerance expressed as % of band WIDTH.
+    - lower: close <= lower + tol * (upper - lower)
+    - upper: close >= upper - tol * (upper - lower)
+    where tol = tolerance_pct / 100.
+    Fallback to strict touch if width invalid.
+    """
     if series is None or len(series) < period + 5:
         return False
+
     lower, mid, upper = compute_bbands(series, period, stddev)
     close = series.iloc[-1]
+
     lb = None if pd.isna(lower.iloc[-1]) else float(lower.iloc[-1])
     ub = None if pd.isna(upper.iloc[-1]) else float(upper.iloc[-1])
-    return (band == "lower" and lb is not None and close <= lb) or (band == "upper" and ub is not None and close >= ub)
+    if lb is None or ub is None:
+        return False
+
+    width = ub - lb
+    tol = max(0.0, float(tolerance_pct)) / 100.0
+
+    if width is not None and width > 0:
+        if band == "lower":
+            threshold = lb + tol * width
+            return close <= threshold
+        if band == "upper":
+            threshold = ub - tol * width
+            return close >= threshold
+
+    # Fallback to strict touch
+    if band == "lower":
+        return close <= lb
+    if band == "upper":
+        return close >= ub
+    return False
 
 def run_rules_for(kind: str, symbol: str, get_series_fn, get_price_fn) -> int:
+    """
+    Evaluate all enabled rules for a given asset (stocks/crypto).
+    Updates DIAG counters when diagnostics is enabled.
+    """
+    dbg = CONFIG.get("debug", {})
+    diag_on = bool(dbg.get("diagnostics", False))
+
     cache, cooldown = load_cache(), CONFIG["alerts"]["cooldown_minutes"]
     alerts = 0
 
@@ -437,7 +472,7 @@ def run_rules_for(kind: str, symbol: str, get_series_fn, get_price_fn) -> int:
     series_cache: Dict[str, pd.Series] = {tf: get_series_fn(tf) for tf in needed}
     cur_price = get_price_fn()
 
-    # Evaluate rules (only enabled, correct scope)
+    # Evaluate rules
     for r in RULES:
         if r.get("enabled", True) is False:
             continue
@@ -459,10 +494,23 @@ def run_rules_for(kind: str, symbol: str, get_series_fn, get_price_fn) -> int:
                         s,
                         int(c.get("period", CONFIG[kind]["bb_period"])),
                         float(c.get("stddev", CONFIG[kind]["bb_stddev"])),
-                        c.get("band", "lower")
+                        c.get("band", "lower"),
+                        float(c.get("tolerance_pct", 0.0))
                     )
                     oks.append(ok); rsis.append(None)
                 tfs.append(tf)
+
+            # C) per-condition classification to feed counters
+            if diag_on:
+                if all(oks):
+                    DIAG[kind]["both"].add(symbol)
+                else:
+                    for c, ok_leg in zip(r["all"], oks):
+                        if ok_leg and c["type"] == "rsi_below":
+                            DIAG[kind]["rsi_only"].add(symbol)
+                        if ok_leg and c["type"] == "bb_touch":
+                            DIAG[kind]["bb_only"].add(symbol)
+
             fired = all(oks)
             tf = tfs[0] if tfs else None
             rep_rsi = next((x for x in rsis if x is not None), None)
@@ -473,16 +521,21 @@ def run_rules_for(kind: str, symbol: str, get_series_fn, get_price_fn) -> int:
             if r["type"] == "rsi_below":
                 rep_rsi = eval_rsi_below(s, float(r["threshold"]), CONFIG[kind]["rsi_period"])
                 fired = rep_rsi is not None
+                if diag_on and fired:
+                    DIAG[kind]["rsi_only"].add(symbol)
             elif r["type"] == "bb_touch":
                 fired = eval_bb_touch(
                     s,
                     int(r.get("period", CONFIG[kind]["bb_period"])),
                     float(r.get("stddev", CONFIG[kind]["bb_stddev"])),
-                    r.get("band", "lower")
+                    r.get("band", "lower"),
+                    float(r.get("tolerance_pct", 0.0))
                 )
+                if diag_on and fired:
+                    DIAG[kind]["bb_only"].add(symbol)
 
         if fired:
-            # Option B1: per-bar dedupe key -> one alert per symbol/rule/TF per bar
+            # B1: per-bar dedupe (one alert per symbol/rule/TF per bar)
             series_for_tf = series_cache.get(tf)
             bar_id = bar_id_for_series(series_for_tf, tf) or "na"
             key = f"{kind}::{symbol}::{r['name']}::{tf}::{bar_id}"
@@ -500,7 +553,6 @@ def run_stocks() -> int:
     if not TWELVEDATA_API_KEY:
         logger.error("Missing TWELVEDATA_API_KEY")
         return 0
-
     syms = load_universe(CONFIG["stocks"]["files"], CONFIG["stocks"]["max_symbols"])
     if not syms:
         logger.warning("Stocks universe is empty.")
@@ -508,7 +560,7 @@ def run_stocks() -> int:
 
     alerts = 0
 
-    # Which TFs are actually needed by enabled rules for stocks?
+    # Which TFs are needed by enabled rules for stocks?
     tfs = set()
     for r in RULES:
         if r.get("enabled", True) is False:
@@ -525,7 +577,6 @@ def run_stocks() -> int:
         td_interval = interval_map.get(tf, "1h")
         logger.info(f"Stocks scanning ({tf}) ...")
 
-        # Batches
         for i in range(0, len(syms), CONFIG["stocks"]["batch_size"]):
             batch = syms[i:i + CONFIG["stocks"]["batch_size"]]
             series_map = td_series_batch(batch, td_interval, CONFIG["stocks"]["outputsize"])
@@ -536,6 +587,17 @@ def run_stocks() -> int:
                 alerts += run_rules_for("stocks", sym, get_series, get_price)
             if i + CONFIG["stocks"]["batch_size"] < len(syms):
                 time.sleep(CONFIG["stocks"]["sleep_between_batches_sec"])
+
+    # D) diagnostics summary (optional; controlled by CONFIG["debug"]["diagnostics"])
+    if CONFIG.get("debug", {}).get("diagnostics", False):
+        n = int(CONFIG["debug"].get("show_first_n", 8))
+        rsi_only = list(DIAG["stocks"]["rsi_only"])[:n]
+        bb_only  = list(DIAG["stocks"]["bb_only"])[:n]
+        both     = list(DIAG"]["stocks"]["both"])[:n]
+        logger.info(f"[stocks] DIAG summary – BOTH={len(DIAG['stocks']['both'])}, "
+                    f"RSI_leg={len(DIAG['stocks']['rsi_only'])}, BB_leg={len(DIAG['stocks']['bb_only'])} "
+                    f"| samples BOTH={both}, RSI={rsi_only}, BB={bb_only}")
+
     return alerts
 
 def run_crypto() -> int:
@@ -549,7 +611,7 @@ def run_crypto() -> int:
     rows = rows[:CONFIG["crypto"]["top_n_for_rsi"]]
     logger.info(f"Crypto scanning with {len(rows)} coins (post-filter).")
 
-    # Which TFs are actually needed by enabled rules for crypto?
+    # Which TFs are needed by enabled rules for crypto?
     tfs = set()
     for r in RULES:
         if r.get("enabled", True) is False:
@@ -567,7 +629,7 @@ def run_crypto() -> int:
         sym = (row.get("symbol") or "").upper()
         cur_price = float(row.get("current_price", 0) or 0)
 
-        # Prefetch series for needed TFs (respect rate limit)
+        # Prefetch series for needed TFs (respect CG rate limit)
         series_cache: Dict[str, pd.Series] = {}
         for tf in sorted(tfs):
             series_cache[tf] = cg_series(cid, CONFIG["crypto"]["vs_currency"], tf) if cid else None
@@ -575,11 +637,20 @@ def run_crypto() -> int:
 
         def get_series_fn(tf: str) -> Optional[pd.Series]:
             return series_cache.get(tf)
-
         def get_price_fn() -> Optional[float]:
             return cur_price
 
         alerts += run_rules_for("crypto", sym, get_series_fn, get_price_fn)
+
+    # D) diagnostics summary (optional)
+    if CONFIG.get("debug", {}).get("diagnostics", False):
+        n = int(CONFIG["debug"].get("show_first_n", 8))
+        rsi_only = list(DIAG["crypto"]["rsi_only"])[:n]
+        bb_only  = list(DIAG["crypto"]["bb_only"])[:n]
+        both     = list(DIAG["crypto"]["both"])[:n]
+        logger.info(f"[crypto] DIAG summary – BOTH={len(DIAG['crypto']['both'])}, "
+                    f"RSI_leg={len(DIAG['crypto']['rsi_only'])}, BB_leg={len(DIAG['crypto']['bb_only'])} "
+                    f"| samples BOTH={both}, RSI={rsi_only}, BB={bb_only}")
 
     return alerts
 
@@ -589,6 +660,10 @@ def run_crypto() -> int:
 def main():
     start = dt.datetime.now()
     logger.info("=== Rule Engine start ===")
+    # Reset DIAG between runs
+    DIAG["stocks"] = {"rsi_only": set(), "bb_only": set(), "both": set()}
+    DIAG["crypto"] = {"rsi_only": set(), "bb_only": set(), "both": set()}
+
     total = 0
     try:
         total += run_stocks()
