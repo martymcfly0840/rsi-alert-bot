@@ -91,7 +91,7 @@ RULES: List[Dict[str, Any]] = [
   "threshold": 200,
   "timeframe": "1h",
   "scope": "both",
-  "enabled": True
+  "enabled": False
     },
     {
         "name": "RSI<50 (base) [1h]",
@@ -109,7 +109,7 @@ RULES: List[Dict[str, Any]] = [
             {"type": "bb_touch", "band": "lower", "timeframe": "4h", "period": 20, "stddev": 2.0}
         ],
         "scope": "both",
-        "enabled": False
+        "enabled": True
     },
     # Examples (disabled by default)
     {
