@@ -84,7 +84,15 @@ CONFIG = {
 # type: "rsi_below" | "bb_touch" | "composite"
 # scope: "stocks" | "crypto" | "both"
 # timeframe: "1h" | "4h" | "1d"
-RULES: List[Dict[str, Any]] = [
+RULES: List[Dict[str, Any]] = [ 
+    {
+  "name": "DEBUG – RSI<200 (1h, both)",
+  "type": "rsi_below",
+  "threshold": 200,
+  "timeframe": "1h",
+  "scope": "both",
+  "enabled": True
+    },
     {
         "name": "RSI<50 (base) [1h]",
         "type": "rsi_below",
@@ -101,7 +109,7 @@ RULES: List[Dict[str, Any]] = [
             {"type": "bb_touch", "band": "lower", "timeframe": "4h", "period": 20, "stddev": 2.0}
         ],
         "scope": "both",
-        "enabled": True
+        "enabled": False
     },
     # Examples (disabled by default)
     {
