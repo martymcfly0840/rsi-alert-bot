@@ -593,7 +593,7 @@ def run_stocks() -> int:
         n = int(CONFIG["debug"].get("show_first_n", 8))
         rsi_only = list(DIAG["stocks"]["rsi_only"])[:n]
         bb_only  = list(DIAG["stocks"]["bb_only"])[:n]
-        both     = list(DIAG"]["stocks"]["both"])[:n]
+        both     = list(DIAG["stocks"]["both"])[:n]
         logger.info(f"[stocks] DIAG summary – BOTH={len(DIAG['stocks']['both'])}, "
                     f"RSI_leg={len(DIAG['stocks']['rsi_only'])}, BB_leg={len(DIAG['stocks']['bb_only'])} "
                     f"| samples BOTH={both}, RSI={rsi_only}, BB={bb_only}")
