@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: rsi-alerts
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   run:
@@ -63,17 +63,59 @@ jobs:
         run: python alerts_bot.py
 
       # Save alert_cache.json to a dedicated branch (NOT to main)
-      - name: Persist alert cache (to alerts-cache branch)
+      
+- name: Persist alert cache (to alerts-cache branch, robust)
         if: always()
+        shell: bash
         run: |
-          if [ -f alert_cache.json ]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git checkout -B alerts-cache
-            git add alert_cache.json
-            git commit -m "chore(cache): update alert cache [skip ci]" || true
-            git push origin alerts-cache
-            echo "Cache updated on alerts-cache branch."
-          else
+          if [ ! -f alert_cache.json ]; then
             echo "No alert_cache.json to persist."
+            exit 0
           fi
+
+          set -e
+          TMP_CACHE=/tmp/alert_cache.json
+          cp -f alert_cache.json "$TMP_CACHE"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Fetch remote branch (if it exists)
+          git fetch origin alerts-cache || true
+
+          # Create/switch local branch based on remote if present, else orphan
+          if git show-ref --verify --quiet refs/remotes/origin/alerts-cache; then
+            git checkout -B alerts-cache origin/alerts-cache
+          else
+            git checkout --orphan alerts-cache
+            # start with a clean tree on orphan
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          # Restore the new cache file into this branch
+          cp -f "$TMP_CACHE" alert_cache.json
+          git add alert_cache.json
+
+          # Commit only if there is a change
+          if git diff --cached --quiet; then
+            echo "No cache changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore(cache): update alert cache [skip ci]"
+
+          # Retry push up to 3 times in case another runner just updated the branch
+          for i in 1 2 3; do
+            if git push origin alerts-cache; then
+              echo "Cache updated (attempt $i)."
+              exit 0
+            fi
+            echo "Push failed (attempt $i). Fetch/rebase and retry..."
+            git fetch origin alerts-cache || true
+            git rebase origin/alerts-cache || true
+            sleep $((RANDOM % 4 + 2))
+          done
+
+          echo "Final attempt with --force-with-lease..."
+          git push --force-with-lease origin alerts-cache
+          echo "Cache updated with force-with-lease."
