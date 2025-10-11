@@ -64,30 +64,39 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python alerts_bot.py
 
-      # Cache mentése dedikált branchre (nem a main-re) – ütközésálló push
-      - name: Persist alert cache (to alerts-cache branch, robust)
+      - name: Persist alert cache (to alerts-cache branch, robust v2)
         if: always()
         shell: bash
         run: |
+          set -e
+
           if [ ! -f alert_cache.json ]; then
             echo "No alert_cache.json to persist."
             exit 0
           fi
-          set -e
+
+          # Git alapbeállítások
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+          # Állapot elmentése temp-be
           TMP_CACHE=/tmp/alert_cache.json
           cp -f alert_cache.json "$TMP_CACHE"
 
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Távoli cache-branch behúzása, ha létezik
+          git fetch origin alerts-cache:alerts-cache || true
 
-          git fetch origin alerts-cache || true
           if git show-ref --verify --quiet refs/remotes/origin/alerts-cache; then
+            # Ha van távoli, helyi branch a távoliról
             git checkout -B alerts-cache origin/alerts-cache
           else
+            # Első alkalom: orphan branch
             git checkout --orphan alerts-cache
             git rm -rf . >/dev/null 2>&1 || true
           fi
 
+          # Új cache bemásolása és commit
           cp -f "$TMP_CACHE" alert_cache.json
           git add alert_cache.json
 
@@ -98,6 +107,7 @@ jobs:
 
           git commit -m "chore(cache): update alert cache [skip ci]"
 
+          # Push 3 próbálkozással, köztes rebase-szel
           for i in 1 2 3; do
             if git push origin alerts-cache; then
               echo "Cache updated (attempt $i)."
@@ -109,6 +119,7 @@ jobs:
             sleep $((RANDOM % 4 + 2))
           done
 
+          # Utolsó próbálkozás biztonságosan
           echo "Final attempt with --force-with-lease..."
           git push --force-with-lease origin alerts-cache
           echo "Cache updated with force-with-lease."
