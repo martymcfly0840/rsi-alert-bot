@@ -1,0 +1,114 @@
+name: RSI Alerts (Discord)
+
+on:
+  workflow_dispatch:      # kézi indítás gomb
+  schedule:
+    - cron: "*/10 * * * *"  # Option B1-hez gyakori futás (10 percenként, UTC)
+
+permissions:
+  contents: write   # cache-branch push miatt
+
+concurrency:
+  group: rsi-alerts
+  cancel-in-progress: true  # kerüljük a párhuzamos futások ütközését
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Cache visszaállítása külön branchről (alerts-cache)
+      - name: Restore alert cache (from alerts-cache branch)
+        run: |
+          git fetch origin alerts-cache:alerts-cache || true
+          if git rev-parse --verify alerts-cache >/dev/null 2>&1; then
+            git show alerts-cache:alert_cache.json > alert_cache.json || true
+            echo "Restored alert_cache.json from alerts-cache branch."
+          else
+            echo "No alerts-cache branch yet. Starting fresh."
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Verify environment
+        run: |
+          python --version
+          python - << 'PY'
+          import pandas as pd, requests
+          print("pandas:", pd.__version__)
+          print("requests:", requests.__version__)
+          PY
+
+      # Szintaxis ellenőrzés – ha itt piros, egyből látod a sor-számot
+      - name: Syntax check
+        run: python -m py_compile alerts_bot.py
+
+      - name: Run RSI alerts
+        env:
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+          COINGECKO_DEMO_API_KEY: ${{ secrets.COINGECKO_DEMO_API_KEY }}
+          COINGECKO_PRO_API_KEY: ${{ secrets.COINGECKO_PRO_API_KEY }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python alerts_bot.py
+
+      # Cache mentése dedikált branchre (nem a main-re) – ütközésálló push
+      - name: Persist alert cache (to alerts-cache branch, robust)
+        if: always()
+        shell: bash
+        run: |
+          if [ ! -f alert_cache.json ]; then
+            echo "No alert_cache.json to persist."
+            exit 0
+          fi
+          set -e
+          TMP_CACHE=/tmp/alert_cache.json
+          cp -f alert_cache.json "$TMP_CACHE"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin alerts-cache || true
+          if git show-ref --verify --quiet refs/remotes/origin/alerts-cache; then
+            git checkout -B alerts-cache origin/alerts-cache
+          else
+            git checkout --orphan alerts-cache
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          cp -f "$TMP_CACHE" alert_cache.json
+          git add alert_cache.json
+
+          if git diff --cached --quiet; then
+            echo "No cache changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore(cache): update alert cache [skip ci]"
+
+          for i in 1 2 3; do
+            if git push origin alerts-cache; then
+              echo "Cache updated (attempt $i)."
+              exit 0
+            fi
+            echo "Push failed (attempt $i). Fetch/rebase and retry..."
+            git fetch origin alerts-cache || true
+            git rebase origin/alerts-cache || true
+            sleep $((RANDOM % 4 + 2))
+          done
+
+          echo "Final attempt with --force-with-lease..."
+          git push --force-with-lease origin alerts-cache
+          echo "Cache updated with force-with-lease."
