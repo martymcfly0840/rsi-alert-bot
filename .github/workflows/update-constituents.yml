@@ -1,0 +1,47 @@
+name: Update Index Constituents (S&P 500 + Russell 2000)
+
+on:
+  schedule:
+    - cron: "15 6 * * *"     # minden nap 06:15 UTC
+  workflow_dispatch:         # kézi indítás
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-constituents:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests lxml beautifulsoup4 html5lib openpyxl
+
+      - name: Run updater
+        run: python update_index_constituents.py
+
+      - name: Create PR with CSV updates
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore(index): refresh S&P 500 and Russell 2000 CSVs"
+          title: "Update S&P 500 / Russell 2000 constituents"
+          body: |
+            Automated refresh of index constituents (S&P 500 from Wikipedia/Slickcharts; Russell 2000 from FTSE Russell, fallback Slickcharts).
+            - sp500.csv
+            - russell2000.csv
+          branch: auto/update-index-constituents
+          base: main
+          add-paths: |
+            sp500.csv
+            russell2000.csv
