@@ -2,16 +2,21 @@ name: Update Index Constituents (S&P 500 + Russell 2000)
 
 on:
   schedule:
-    - cron: "15 6 * * *"     # minden nap 06:15 UTC
-  workflow_dispatch:         # kézi indítás
+    - cron: "15 6 * * *"       # naponta 06:15 UTC
+  workflow_dispatch:
 
 permissions:
   contents: write
   pull-requests: write
 
+concurrency:
+  group: update-constituents
+  cancel-in-progress: true
+
 jobs:
   update-constituents:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout (full)
         uses: actions/checkout@v4
@@ -31,17 +36,27 @@ jobs:
       - name: Run updater
         run: python update_index_constituents.py
 
+      # Hasznos: generált CSV-k feltöltése artifactként letöltésre
+      - name: Upload artifacts (CSV preview)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: constituents-output
+          path: artifacts/
+
       - name: Create PR with CSV updates
         uses: peter-evans/create-pull-request@v6
         with:
           commit-message: "chore(index): refresh S&P 500 and Russell 2000 CSVs"
           title: "Update S&P 500 / Russell 2000 constituents"
           body: |
-            Automated refresh of index constituents (S&P 500 from Wikipedia/Slickcharts; Russell 2000 from FTSE Russell, fallback Slickcharts).
-            - sp500.csv
-            - russell2000.csv
+            Automated refresh of index constituents.
+            Sources:
+            - S&P 500: Wikipedia (fallback Slickcharts)
+            - Russell 2000: FTSE Russell (fallback Slickcharts / TradingView)
           branch: auto/update-index-constituents
           base: main
           add-paths: |
             sp500.csv
             russell2000.csv
+``
